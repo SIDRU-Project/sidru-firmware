@@ -1,0 +1,6 @@
+# PlatformIO
+.pio/
+# Editor
+.vscode/
+# Secreto local (WiFi/API key/MQTT) — NUNCA commitear
+src/secrets.h
