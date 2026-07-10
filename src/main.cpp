@@ -6,6 +6,7 @@
 #include "config.h"
 #include "net/wifi_manager.h"
 #include "net/mqtt_client.h"
+#include "net/offline_queue.h"
 #include "hw/sensors.h"
 #include "hw/scale.h"
 #include "hw/gate.h"
@@ -32,6 +33,7 @@ void setup() {
 
     net::wifiBegin();
     mqtt::begin();      // no-op si MQTT_ENABLED=false
+    offline::begin();   // carga la cola de sesiones offline desde NVS (US-16)
 
     if (CALIBRATION_MODE) {
         hw::showCalib("Vacia la balanza", 0, 0);

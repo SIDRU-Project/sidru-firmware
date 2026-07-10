@@ -40,6 +40,7 @@
 #define TOUCH_CS           15
 #define TOUCH_IRQ          27
 #define TOUCH_Z2_THRESHOLD 3700  // tocado si z2 < esto (z2 cae de ~4095 a ~2700 al tocar)
+#define TOUCH_TAP_SAMPLES  3     // lecturas seguidas de presión para validar un "tap" (anti-rebote)
 // Celda de carga HX711
 #define HX711_DT           21
 #define HX711_SCK          22
@@ -50,13 +51,13 @@
 #define PIN_SENSOR_CAPACITIVO  17   // plástico → contar
 
 // ───────────────────────── Servo (grados) ───────────────────────────────────
-#define SERVO_CERRADO_DEG  90    // posición por defecto / reposo (recolección)
-#define SERVO_ABIERTO_DEG  180   // chapa VÁLIDA (aceptar): gira a 180°
-#define SERVO_RECHAZO_DEG  0     // metal (rechazar): gira a 0°
-#define SERVO_INICIO_DEG   180   // pantalla "Comenzar"
+#define SERVO_CERRADO_DEG  90    // posición por defecto / reposo (recolección) — pivote, no cambia
+#define SERVO_ABIERTO_DEG  0     // chapa VÁLIDA (aceptar): gira a 0° (invertido: antes 180°)
+#define SERVO_RECHAZO_DEG  180   // metal (rechazar): gira a 180° (invertido: antes 0°)
+#define SERVO_INICIO_DEG   0     // pantalla "Comenzar" (invertido: antes 180°)
 #define GATE_ACEPTA_MS     500UL     // gesto del servo al aceptar una chapa válida
 #define GATE_RECHAZO_MS    1500UL    // el servo se mantiene en posición de rechazo (1.5 s)
-#define GATE_AVISO_MS      2000UL    // aviso ANTES de rechazar (para que el usuario retire la mano)
+#define GATE_AVISO_MS      1000UL    // aviso ANTES de rechazar (para que el usuario retire la mano)
 #define SERVO_INVERTED     1         // 1 = etapa inversora en hardware (pulso complementado, "OUT-LO")
 
 // ───────────────────────── Celda de carga ───────────────────────────────────
@@ -71,10 +72,26 @@
 #define GATE_ABIERTA_MS       4000UL    // tiempo que la compuerta queda abierta
 #define SENSOR_DEBOUNCE_MS    80UL
 #define CAP_LOCKOUT_MS        700UL    // tras contar una chapa, ignora detecciones (1 chapa = 1 conteo)
+#define GATE_GRACIA_MS        800UL    // tras pulsar "Comenzar", ignora el sensor mientras la paleta del servo
+                                       // se mueve a 90° (evita contar la propia paleta como chapa)
 #define METAL_WINDOW_MS       800UL    // tiempo de espera para que el inductivo alcance a ver el metal
                                        // (la chapa pasa por el capacitivo primero y llega al inductivo después)
 #define WIFI_RETRY_MS         500UL
 #define HTTP_TIMEOUT_MS       8000UL
+
+// ───────────────────────── Offline / sincronización (US-16) ─────────────────
+// Si al cerrar una sesión no hay WiFi o el backend falla, la sesión NO se descarta:
+// se guarda en NVS (flash) y se reintenta cuando vuelve la conexión.
+#define OFFLINE_QUEUE_MAX        8        // máximo de sesiones en cola (FIFO; descarta la más vieja si se llena)
+#define OFFLINE_SYNC_INTERVAL_MS 15000UL  // cada cuánto reintentar la sincronización en la pantalla "Comenzar"
+
+// ───────────────────────── Deep sleep (US-31) ───────────────────────────────
+// Ahorro de energía: tras inactividad en "Comenzar", el ESP32 entra en deep sleep
+// y despierta al tocar la pantalla (PENIRQ del XPT2046 en TOUCH_IRQ). Al despertar
+// el chip se reinicia (vuelve a setup()). Desactivado por defecto para no interrumpir
+// demos; ponlo en true para validarlo. No duerme si hay sesiones offline pendientes.
+#define DEEP_SLEEP_ENABLED       false
+#define DEEP_SLEEP_AFTER_MS      120000UL  // 2 min sin tocar -> dormir
 
 // ───────────────────────── Negocio ──────────────────────────────────────────
 #define CAP_COUNT_MIN      1

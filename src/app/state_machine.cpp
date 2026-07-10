@@ -1,9 +1,11 @@
 #include "state_machine.h"
 #include <Arduino.h>
+#include <esp_sleep.h>
 #include "../config.h"
 #include "../net/wifi_manager.h"
 #include "../net/api_client.h"
 #include "../net/mqtt_client.h"
+#include "../net/offline_queue.h"
 #include "../hw/sensors.h"
 #include "../hw/scale.h"
 #include "../hw/gate.h"
@@ -25,6 +27,8 @@ static unsigned long lastDepositMs = 0;
 static unsigned long confirmDeadlineMs = 0;
 static unsigned long lastPollMs = 0;
 static unsigned long errorUntilMs = 0;
+static unsigned long lastActivityMs = 0;   // última interacción (para el deep sleep, US-31)
+static unsigned long lastSyncMs = 0;        // último intento de sincronización offline (US-16)
 
 static void resetCycle() {
     capCount = 0;
@@ -32,8 +36,40 @@ static void resetCycle() {
     qrToken = "";
     points = 0;
     state = START;
+    lastActivityMs = millis();         // reinicia el contador de inactividad para el deep sleep
     hw::gateHold(SERVO_INICIO_DEG);    // servo en 0° en la pantalla "Comenzar"
     hw::showStart();
+    hw::touchTapReset();               // exige soltar+tocar: no salta con lecturas espurias al encender
+}
+
+// Sincroniza sesiones offline pendientes cuando hay WiFi (US-16). Throttled para no
+// bloquear la pantalla "Comenzar"; sync() drena hasta el primer fallo.
+static void syncOfflineIfDue() {
+    if (offline::pending() == 0 || !net::wifiConnected()) return;
+    if (millis() - lastSyncMs < OFFLINE_SYNC_INTERVAL_MS) return;
+    lastSyncMs = millis();
+    int n = offline::sync();
+    if (n > 0) {
+        mqtt::publishEvent("offline_synced", String("count=") + n);
+        hw::showStart();   // redibuja "Comenzar" tras el trabajo de red
+    }
+}
+
+// Deep sleep tras inactividad en "Comenzar" (US-31). No duerme si está deshabilitado
+// o si hay sesiones offline por sincronizar. Despierta al tocar la pantalla.
+static void maybeDeepSleep() {
+    if (!DEEP_SLEEP_ENABLED) return;
+    if (offline::pending() > 0) return;
+    if (millis() - lastActivityMs < DEEP_SLEEP_AFTER_MS) return;
+
+    Serial.println("[SLEEP] inactividad: entrando en deep sleep");
+    mqtt::publishEvent("sleep", "inactividad");
+    delay(150);
+    hw::showBanner("DURMIENDO", "toca para iniciar");
+    delay(1500);
+    // PENIRQ del XPT2046 (TOUCH_IRQ) baja a LOW al tocar → ext0 wake en nivel 0.
+    esp_sleep_enable_ext0_wakeup((gpio_num_t)TOUCH_IRQ, 0);
+    esp_deep_sleep_start();   // el chip se reinicia al despertar (vuelve a setup())
 }
 
 // Aviso antes de rechazar metal: cuenta regresiva para que el usuario retire la mano,
@@ -56,11 +92,16 @@ void update() {
 
         case START: {
             // Pantalla "Comenzar": servo en 0°. Al tocar, pasa a 90° y arranca la recolección.
-            if (hw::touchPressed()) {
+            syncOfflineIfDue();   // reintenta sesiones offline pendientes (US-16)
+            if (hw::touchTap()) {
+                lastActivityMs = millis();             // hay interacción: reinicia el reloj de deep sleep
                 hw::gateHold(SERVO_CERRADO_DEG);   // 90°: posición de recolección
+                hw::sensorsIgnoreFor(GATE_GRACIA_MS);  // no cuentes la paleta del servo como chapa
                 state = IDLE;
                 hw::showIdle();
+                break;
             }
+            maybeDeepSleep();     // duerme tras inactividad si está habilitado (US-31)
             break;
         }
 
@@ -76,6 +117,7 @@ void update() {
                 lastDepositMs = millis();
                 state = COUNTING;
                 hw::showCounting(capCount, hw::scaleReadGramsFast(), true);  // dibuja botón TERMINÉ
+                hw::touchTapReset();         // el tap de COMENZAR no debe disparar TERMINÉ
             }
             break;
         }
@@ -98,7 +140,7 @@ void update() {
                 hw::showCounting(capCount, hw::scaleReadGramsFast(), false);
             }
             // Botón TERMINÉ (táctil) → cierra el depósito y pesa.
-            if (hw::touchPressed()) {
+            if (hw::touchTap()) {
                 state = WEIGHING;
                 break;
             }
@@ -122,10 +164,14 @@ void update() {
         }
 
         case CREATING: {
+            // US-16: si no hay WiFi o el backend falla, la sesión NO se pierde: se
+            // guarda en NVS y se sincroniza luego (no se muestra QR, el ciudadano ya no está).
             if (!net::wifiConnected()) {
-                hw::showError("Sin WiFi");
-                errorUntilMs = millis() + 3000;
-                state = ERROR_STATE;
+                offline::enqueue(capCount, weightGrams);
+                mqtt::publishEvent("offline_queued", String("no_wifi pending=") + offline::pending());
+                hw::showBanner("GUARDADO", "sin conexion");
+                delay(2500);
+                resetCycle();
                 break;
             }
             api::CreateResult r = api::createSession(capCount, weightGrams);
@@ -135,11 +181,14 @@ void update() {
                 hw::showQr(qrToken, points);
                 confirmDeadlineMs = millis() + SESION_EXPIRA_MS;
                 lastPollMs = 0;
+                mqtt::clearOpen();   // ignora OPEN colgado de un ciclo previo: solo cuenta el de ESTA sesión
                 state = WAIT_CONFIRM;
             } else {
-                hw::showError("Backend");
-                errorUntilMs = millis() + 3000;
-                state = ERROR_STATE;
+                offline::enqueue(capCount, weightGrams);
+                mqtt::publishEvent("offline_queued", String("backend_err pending=") + offline::pending());
+                hw::showBanner("GUARDADO", "se sincronizara");
+                delay(2500);
+                resetCycle();
             }
             break;
         }
