@@ -95,10 +95,10 @@ void update() {
             syncOfflineIfDue();   // reintenta sesiones offline pendientes (US-16)
             if (hw::touchTap()) {
                 lastActivityMs = millis();             // hay interacción: reinicia el reloj de deep sleep
-                hw::gateHold(SERVO_CERRADO_DEG);   // 90°: posición de recolección
+                hw::gateHold(SERVO_CERRADO_DEG);       // 90°: posición de recolección
                 hw::sensorsIgnoreFor(GATE_GRACIA_MS);  // no cuentes la paleta del servo como chapa
-                state = IDLE;
-                hw::showIdle();
+                state = IDLE;                          // NO se tara aquí: bloquear el HX711 en el tap
+                hw::showIdle();                        // congela el servo/sensor. El re-tarado va en OPEN_GATE.
                 break;
             }
             maybeDeepSleep();     // duerme tras inactividad si está habilitado (US-31)
@@ -111,7 +111,8 @@ void update() {
                 rejectMetal();
                 hw::showIdle();
             } else if (ev == hw::DEP_PLASTIC) {
-                // No se re-tara: el cero se fijó al arrancar (balanza vacía).
+                // El cero se re-tara al final de cada reclamo (OPEN_GATE, tras volcar las chapas),
+                // así esta sesión pesa solo SUS chapas y no arrastra el peso del reclamo anterior.
                 hw::gateAccept();            // el servo se activa al aceptar la chapa
                 capCount = 1;
                 lastDepositMs = millis();
@@ -223,7 +224,10 @@ void update() {
 
         case OPEN_GATE: {
             hw::showThanks(points);
-            hw::gateOpen();      // abre, espera y cierra
+            hw::gateOpen();      // abre, vuelca las chapas al almacén y cierra
+            hw::scaleTare();     // depósito ya vacío: re-tara a cero para que el próximo reclamo
+                                 // pese solo SUS chapas. Aquí es seguro (no hay dedo en pantalla
+                                 // ni el servo moviéndose): no interfiere con el táctil ni el sensor.
             delay(1500);
             resetCycle();
             break;

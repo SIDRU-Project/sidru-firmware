@@ -2,17 +2,17 @@
 // SIDRU Smart Bin — configuración NO secreta (pines, endpoints, topics, tiempos).
 // Los secretos (WiFi, API key, MQTT pass, IP del backend) van en secrets.h (gitignored).
 
-// ───────────────────────── Identidad del dispositivo ─────────────────────────
+// --- Identidad del dispositivo ---
 #define DEVICE_CODE        "BIN-001"        // debe existir en la tabla smart_bins
 
-// ───────────────────────── Endpoints HTTP ───────────────────────────────────
+// --- Endpoints HTTP ---
 // SERVER_HOST se define en secrets.h (IP LAN del PC que corre el backend).
 #define API_PORT           8080
 #define API_BASE_PATH      "/api/v1"
 #define EP_CREATE_SESSION  API_BASE_PATH "/sessions"
 #define EP_SESSION_BY_QR   API_BASE_PATH "/sessions/qr/"   // + {qrToken}
 
-// ───────────────────────── MQTT ─────────────────────────────────────────────
+// --- MQTT ---
 #define MQTT_PORT          1883
 #define MQTT_TOPIC_COMMANDS "sidru/bin/" DEVICE_CODE "/commands"
 #define MQTT_TOPIC_EVENTS   "sidru/bin/" DEVICE_CODE "/events"
@@ -31,7 +31,7 @@
 // para calcular HX711_SCALE_FACTOR con un peso conocido. Pon false al terminar.
 #define CALIBRATION_MODE    false
 
-// ───────────────────────── Pines (ver docs/specs/sidru-iot/hardware-spec.md) ─
+// --- Pines (ver docs/specs/sidru-iot/hardware-spec.md) ---
 // Display ILI9341 (SPI hardware: SCK=18, MOSI=23, MISO=19 por defecto en ESP32 VSPI)
 #define TFT_CS             5
 #define TFT_DC             2
@@ -40,7 +40,10 @@
 #define TOUCH_CS           15
 #define TOUCH_IRQ          27
 #define TOUCH_Z2_THRESHOLD 3700  // tocado si z2 < esto (z2 cae de ~4095 a ~2700 al tocar)
-#define TOUCH_TAP_SAMPLES  3     // lecturas seguidas de presión para validar un "tap" (anti-rebote)
+#define TOUCH_TAP_SAMPLES  3     // (obsoleto) el "tap" ya no cuenta lecturas: mide tiempo (ver abajo)
+#define TOUCH_TAP_HOLD_MS  90UL  // presión CONTINUA (ms) para validar un "tap" real. Un toque
+                                 // deliberado dura >100 ms; el ruido a kHz dura microsegundos y
+                                 // no llega a este mínimo → evita el auto-inicio de la pantalla START
 // Celda de carga HX711
 #define HX711_DT           21
 #define HX711_SCK          22
@@ -50,7 +53,7 @@
 #define PIN_SENSOR_INDUCTIVO   16   // metal  → rechazar
 #define PIN_SENSOR_CAPACITIVO  17   // plástico → contar
 
-// ───────────────────────── Servo (grados) ───────────────────────────────────
+// --- Servo (grados) ---
 #define SERVO_CERRADO_DEG  90    // posición por defecto / reposo (recolección) — pivote, no cambia
 #define SERVO_ABIERTO_DEG  0     // chapa VÁLIDA (aceptar): gira a 0° (invertido: antes 180°)
 #define SERVO_RECHAZO_DEG  180   // metal (rechazar): gira a 180° (invertido: antes 0°)
@@ -60,12 +63,12 @@
 #define GATE_AVISO_MS      1000UL    // aviso ANTES de rechazar (para que el usuario retire la mano)
 #define SERVO_INVERTED     1         // 1 = etapa inversora en hardware (pulso complementado, "OUT-LO")
 
-// ───────────────────────── Celda de carga ───────────────────────────────────
+// --- Celda de carga ---
 // Calibrar (ver hardware-spec.md §4) y ajustar este factor.
 #define HX711_SCALE_FACTOR -940.0f   // calibrado: 218 g -> raw -204917 (celda invertida = signo -)
 #define HX711_MIN_GRAMS    1.0f      // umbral mínimo para enviar una sesión
 
-// ───────────────────────── Tiempos (ms) ─────────────────────────────────────
+// --- Tiempos (ms) ---
 #define DEPOSITO_VENTANA_MS   30000UL   // safety: si no pulsan TERMINÉ, cierra tras 30 s sin chapas
 #define SESION_EXPIRA_MS      900000UL  // 15 min (alineado a session-expiry-minutes)
 #define POLL_INTERVALO_MS     3000UL    // polling de estado si MQTT off
@@ -77,15 +80,16 @@
 #define METAL_WINDOW_MS       800UL    // tiempo de espera para que el inductivo alcance a ver el metal
                                        // (la chapa pasa por el capacitivo primero y llega al inductivo después)
 #define WIFI_RETRY_MS         500UL
+#define WIFI_CONNECT_TIMEOUT_MS 8000UL  // si una red no conecta en este tiempo, prueba la siguiente (failover)
 #define HTTP_TIMEOUT_MS       8000UL
 
-// ───────────────────────── Offline / sincronización (US-16) ─────────────────
+// --- Offline / sincronización (US-16) ---
 // Si al cerrar una sesión no hay WiFi o el backend falla, la sesión NO se descarta:
 // se guarda en NVS (flash) y se reintenta cuando vuelve la conexión.
 #define OFFLINE_QUEUE_MAX        8        // máximo de sesiones en cola (FIFO; descarta la más vieja si se llena)
 #define OFFLINE_SYNC_INTERVAL_MS 15000UL  // cada cuánto reintentar la sincronización en la pantalla "Comenzar"
 
-// ───────────────────────── Deep sleep (US-31) ───────────────────────────────
+// --- Deep sleep (US-31) ---
 // Ahorro de energía: tras inactividad en "Comenzar", el ESP32 entra en deep sleep
 // y despierta al tocar la pantalla (PENIRQ del XPT2046 en TOUCH_IRQ). Al despertar
 // el chip se reinicia (vuelve a setup()). Desactivado por defecto para no interrumpir
@@ -93,6 +97,6 @@
 #define DEEP_SLEEP_ENABLED       false
 #define DEEP_SLEEP_AFTER_MS      120000UL  // 2 min sin tocar -> dormir
 
-// ───────────────────────── Negocio ──────────────────────────────────────────
+// --- Negocio ---
 #define CAP_COUNT_MIN      1
 #define CAP_COUNT_MAX      500

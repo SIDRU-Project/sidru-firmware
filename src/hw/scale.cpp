@@ -20,7 +20,8 @@ void scaleBegin() {
 }
 
 void scaleTare() {
-    if (scale.is_ready()) scale.tare();
+    // Espera a que el HX711 esté listo para que la tara no se salte por timing.
+    if (scale.wait_ready_timeout(400)) scale.tare();
 }
 
 bool scaleReady() {
