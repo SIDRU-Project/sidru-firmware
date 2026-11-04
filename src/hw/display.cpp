@@ -2,7 +2,10 @@
 #include <Adafruit_GFX.h>
 #include <Adafruit_ILI9341.h>
 #include <qrcode.h>
+#include <string.h>
 #include "../config.h"
+#include "../dbg/log.h"
+#include "../dbg/selftest.h"
 
 // Paleta SIDRU (acorde a la app web): fondo negro, verde menta, cian.
 #define C_BG     ILI9341_BLACK
@@ -183,101 +186,99 @@ void showError(const String& msg) {
     tft.println(msg);
 }
 
-void showMonitor(bool wifiOk, const String& ip, int cap, int ind, float grams, bool touch) {
-    static bool   inited = false;
-    static bool   lWifi;
-    static String lIp;
-    static int    lCap, lInd, lMat, lG, lTouch;
+// Pantalla DIAG (FASE 7): reemplaza a los antiguos showMonitor()/showMonitorGsm().
+// Tabla compacta de dbg::SelfTest (nombre/estado/detalle — st.items[CHK_TRANSPORT]
+// ya trae el dato correcto según GSM_BENCH_MODE, ver app/selftest.cpp), valores
+// vivos de sensores/balanza/táctil, y las últimas líneas del ring buffer de LOG
+// (US-IOT-14). Refresco throttled: la tabla de checks se compara por memcmp (barato,
+// struct chica) y el panel de log a ~500 ms (evita reasignar Strings en cada loop()).
+void showDiag(const dbg::SelfTest& st, int cap, int ind, float grams, bool touch) {
+    static bool          inited = false;
+    static dbg::SelfTest lastSt;
+    static String        lastLive = "\x01";   // sentinel: fuerza el primer dibujo
+    static unsigned long lastLogMs = 0;
+    static String        lLogLines[dbg::kLogRingLines];
+    static int           lLogCount = -1;
+
+    const int rowH      = 11;
+    const int tableY0   = 26;
+    const int tableH    = dbg::CHK_COUNT * rowH;
+    const int liveY     = tableY0 + tableH + 4;
+    const int logHdrY   = liveY + 16;
+    const int logY0     = logHdrY + 12;
+    const int logLineH  = 11;
+    const int logAreaH  = dbg::kLogRingLines * logLineH;
 
     if (!inited) {
         tft.fillScreen(ILI9341_BLACK);
-        // Barra de título
-        tft.fillRect(0, 0, 240, 34, ILI9341_NAVY);
+        tft.fillRect(0, 0, 240, 22, ILI9341_NAVY);
         tft.setTextColor(ILI9341_WHITE);
-        tft.setTextSize(2);
-        tft.setCursor(8, 9);   tft.print("SIDRU  " DEVICE_CODE);
-        // Etiquetas estáticas
-        tft.setCursor(8, 46);  tft.print("WiFi:");
-        tft.setTextColor(ILI9341_YELLOW);
-        tft.setCursor(8, 80);  tft.print("SENSORES");
-        tft.setTextColor(ILI9341_WHITE);
-        tft.setCursor(8, 110); tft.print("CAP D17:");
-        tft.setCursor(8, 142); tft.print("IND D16:");
-        tft.setCursor(8, 176); tft.print("Mat:");
-        tft.setTextColor(ILI9341_YELLOW);
-        tft.setCursor(8, 210); tft.print("BALANZA");
-        tft.setTextColor(ILI9341_WHITE);
-        tft.setCursor(8, 240); tft.print("Peso:");
-        tft.setCursor(8, 278); tft.print("TOQUE:");
-        tft.setTextColor(ILI9341_DARKGREY);
         tft.setTextSize(1);
-        tft.setCursor(8, 308); tft.print("MONITOR  toca la pantalla para probar");
+        tft.setCursor(4, 3);   tft.print("SIDRU " DEVICE_CODE "  " FW_VERSION);
+        tft.setCursor(4, 13);  tft.print(FW_BUILD_STAMP);
+
+        tft.setTextColor(ILI9341_DARKGREY);
+        tft.setCursor(2, logHdrY); tft.print("LOG (ultimas lineas):");
+
         inited = true;
-        lWifi = !wifiOk; lIp = ""; lCap = -9; lInd = -9; lMat = -9; lG = -99999; lTouch = -1;
+        memset(&lastSt, 0xFF, sizeof(lastSt));   // fuerza el primer dibujo de la tabla
+        lastLive = "\x01";
+        lLogCount = -1;
     }
 
-    // WiFi
-    if (wifiOk != lWifi || ip != lIp) {
-        lWifi = wifiOk; lIp = ip;
-        tft.fillRect(78, 46, 162, 18, ILI9341_BLACK);
-        tft.setTextSize(2);
-        tft.setCursor(78, 46);
-        if (wifiOk) { tft.setTextColor(ILI9341_GREEN); tft.print(ip); }
-        else        { tft.setTextColor(ILI9341_RED);   tft.print("..."); }
+    // Tabla de self-test: un memcmp barato de la struct entera evita comparar
+    // check por check; si algo cambió, se redibuja toda la tabla (9 filas chicas).
+    if (memcmp(&st, &lastSt, sizeof(dbg::SelfTest)) != 0) {
+        lastSt = st;
+        tft.fillRect(0, tableY0, 240, tableH, ILI9341_BLACK);
+        tft.setTextSize(1);
+        for (int i = 0; i < dbg::CHK_COUNT; i++) {
+            const dbg::Check& c = st.items[i];
+            uint16_t color = (c.status == dbg::CheckStatus::OK)    ? ILI9341_GREEN
+                            : (c.status == dbg::CheckStatus::FALLA) ? ILI9341_RED
+                                                                     : ILI9341_DARKGREY;
+            tft.setTextColor(color);
+            tft.setCursor(2, tableY0 + i * rowH);
+            tft.printf("%-10s %-5s %s", c.name, dbg::checkStatusStr(c.status), c.detail);
+        }
     }
 
-    // Capacitivo
-    if (cap != lCap) {
-        lCap = cap;
-        tft.fillRect(118, 110, 122, 18, ILI9341_BLACK);
-        tft.setTextSize(2);
-        tft.setCursor(118, 110);
-        tft.setTextColor(cap ? ILI9341_GREEN : ILI9341_ORANGE);
-        tft.printf("%d %s", cap, cap ? "vacio" : "DETECTA");
-    }
-
-    // Inductivo
-    if (ind != lInd) {
-        lInd = ind;
-        tft.fillRect(118, 142, 122, 18, ILI9341_BLACK);
-        tft.setTextSize(2);
-        tft.setCursor(118, 142);
-        tft.setTextColor(ind ? ILI9341_GREEN : ILI9341_ORANGE);
-        tft.printf("%d %s", ind, ind ? "vacio" : "METAL");
-    }
-
-    // Material derivado (ind=0 -> metal; solo cap=0 -> plastico)
-    int mat = (ind == 0) ? 2 : (cap == 0 ? 1 : 0);
-    if (mat != lMat) {
-        lMat = mat;
-        tft.fillRect(64, 176, 176, 18, ILI9341_BLACK);
-        tft.setTextSize(2);
-        tft.setCursor(64, 176);
-        if (mat == 2)      { tft.setTextColor(ILI9341_RED);      tft.print("METAL"); }
-        else if (mat == 1) { tft.setTextColor(ILI9341_GREEN);    tft.print("PLASTICO"); }
-        else               { tft.setTextColor(ILI9341_DARKGREY); tft.print("---"); }
-    }
-
-    // Balanza (gramos)
-    int g = (int)(grams + 0.5f);
-    if (g != lG) {
-        lG = g;
-        tft.fillRect(86, 236, 154, 26, ILI9341_BLACK);
-        tft.setTextSize(3);
-        tft.setCursor(86, 236);
+    // Sensores/balanza/táctil: valores vivos (igual que el viejo showMonitor()).
+    char liveBuf[48];
+    snprintf(liveBuf, sizeof(liveBuf), "CAP:%d IND:%d %.1fg TOQUE:%s",
+             cap, ind, grams, touch ? "si" : "no");
+    if (lastLive != liveBuf) {
+        lastLive = liveBuf;
+        tft.fillRect(0, liveY, 240, 12, ILI9341_BLACK);
+        tft.setTextSize(1);
         tft.setTextColor(ILI9341_CYAN);
-        tft.printf("%d g", g);
+        tft.setCursor(2, liveY);
+        tft.print(liveBuf);
     }
 
-    // Táctil (toque sí/no)
-    int t = touch ? 1 : 0;
-    if (t != lTouch) {
-        lTouch = t;
-        tft.fillRect(108, 278, 132, 18, ILI9341_BLACK);
-        tft.setTextSize(2);
-        tft.setCursor(108, 278);
-        if (t) { tft.setTextColor(ILI9341_GREEN);    tft.print("SI"); }
-        else   { tft.setTextColor(ILI9341_DARKGREY); tft.print("no"); }
+    // Log ring buffer: throttled a ~500 ms (evita reasignar Strings en cada loop()).
+    unsigned long now = millis();
+    if (lLogCount < 0 || now - lastLogMs >= 500) {
+        lastLogMs = now;
+        String cur[dbg::kLogRingLines];
+        int n = dbg::lastLines(cur, dbg::kLogRingLines);
+        bool changed = (n != lLogCount);
+        if (!changed) {
+            for (int i = 0; i < n; i++) {
+                if (cur[i] != lLogLines[i]) { changed = true; break; }
+            }
+        }
+        if (changed) {
+            lLogCount = n;
+            for (int i = 0; i < n; i++) lLogLines[i] = cur[i];
+            tft.fillRect(0, logY0, 240, logAreaH, ILI9341_BLACK);
+            tft.setTextSize(1);
+            tft.setTextColor(ILI9341_CYAN);
+            for (int i = 0; i < n; i++) {
+                tft.setCursor(2, logY0 + i * logLineH);   // 40 chars @ size1 = 240px, casi todo el ancho
+                tft.print(lLogLines[i]);
+            }
+        }
     }
 }
 

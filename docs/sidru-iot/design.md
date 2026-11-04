@@ -207,4 +207,119 @@ docker exec -it mosquitto mosquitto_sub -u sidru -P "$MQTT_PASSWORD" -t 'sidru/b
 | Coherencia peso/conteo | `weightGrams` y `capCount` se envían juntos; la celda calibrada (≈2.3 g/chapa) |
 | Latencia de apertura | MQTT QoS 1 → entrega garantizada; *polling* como red de seguridad |
 | Seguridad | Sin secretos en repo; broker con auth; TLS como mejora post-MVP |
-| Observabilidad | Logs por `Serial` + (opcional) eventos MQTT de heartbeat |
+| Observabilidad | Logs por `Serial` + (opcional) eventos MQTT de heartbeat — **ver §8.5**: cambia con GSM |
+
+---
+
+## 8. Transporte GSM/GPRS (módulo GA6) — arquitectura y migración
+
+Implementa la decisión fija de `requirements.md` §3.1: el bin usa GSM/GPRS como fuente **principal**
+de internet, no WiFi. Esta sección es la referencia de diseño para "coder"; no reemplaza el flujo de
+aplicación (máquina de estados, HTTP/MQTT a nivel de protocolo) descrito en §1–§2, solo la capa de
+transporte y lo que eso arrastra (logging, timeouts, destino de red).
+
+### 8.1 Por qué TinyGSM + ArduinoHttpClient (y no reinventar un cliente AT a mano)
+
+- **TinyGSM** soporta el **SIM800** (`TINY_GSM_MODEM_SIM800`, el módem mejor soportado de la
+  librería; módulo actual desde el 20-09-2026) y también el Ai-Thinker A6/A7 (`TINY_GSM_MODEM_A6`,
+  usado en la evaluación inicial del IOT-GA6, descartado). Expone `TinyGsmClient`, una clase que
+  implementa la interfaz `Client` de Arduino — la misma interfaz que `WiFiClient`. Cambiar de módem
+  es cambiar ese `#define` y el tipo de `RegStatus`; el resto del diseño no se toca. Esto significa que se puede **pasar tal cual** a `PubSubClient` (MQTT) sin reescribir
+  ese cliente.
+- **ArduinoHttpClient** (`arduino-libraries/ArduinoHttpClient`) expone una clase `HttpClient` que
+  también recibe cualquier `Client` en el constructor — reemplaza a `HTTPClient` de ESP32 (que es
+  WiFi/Ethernet-only y no sirve sobre un módem AT).
+- Con esto, `api_client.cpp` y `mqtt_client.cpp` cambian su **fuente del socket** (de `WiFiClient` a
+  `TinyGsmClient`) pero mantienen su interfaz pública (`api::createSession`, `api::sessionStatus`,
+  `mqtt::begin/loop/consumeOpen/...`) intacta — `app/state_machine.cpp` no se toca.
+
+### 8.2 Nuevo módulo `net/gsm_manager.*` (reemplaza el rol de campo de `wifi_manager`)
+
+```
+net/
+├── gsm_manager.h/.cpp   # NUEVO: power-on del módem, registro de red, adjunto GPRS, backoff
+├── wifi_manager.h/.cpp  # se conserva, solo para banco/desarrollo (ver §8.6)
+├── api_client.h/.cpp    # migra su Client interno de WiFiClient a TinyGsmClient
+└── mqtt_client.h/.cpp   # migra su Client interno de WiFiClient a TinyGsmClient
+```
+
+API sugerida (misma forma que `wifi_manager`, para minimizar el diff en `main.cpp`):
+```cpp
+namespace net {
+  void gsmBegin();                 // power-on (PWRKEY si aplica), init módem, primer intento de red
+  bool gsmEnsure();                // no bloqueante, llamar en loop(); reintenta con backoff
+  bool gsmConnected();             // registro de red + GPRS adjunto
+  String gsmIp();                  // IP asignada por el operador, o "" si no hay
+  int  gsmSignalQuality();         // AT+CSQ crudo (0-31, 99=desconocido) — para MONITOR_MODE (US-IOT-14)
+  TinyGsmClient& gsmClient();      // el Client compartido que usan api_client y mqtt_client
+}
+```
+
+Secuencia de `gsmBegin()`: pulso `PWRKEY` (si el breakout lo requiere — **a confirmar contra el
+datasheet real del módulo**, ver `hardware-spec.md` §6) → `modem.restart()`/`init()` → `AT+CPIN?`
+(SIM lista, US-IOT-13) → `modem.waitForNetwork()` (registro, ERR-IOT-10) → `modem.gprsConnect(apn,
+user, pass)` (adjunto GPRS, ERR-IOT-11). Todo con timeouts acotados y sin bloquear más de lo que ya
+tolera el `loop()` actual (mismo criterio no bloqueante que `wifiEnsure()`).
+
+### 8.3 Migración de `api_client.cpp`
+
+- `HTTPClient http; http.begin(url); http.POST(...)` → `HttpClient http(net::gsmClient(),
+  SERVER_HOST, API_PORT); http.post(path, "application/json", payload);`.
+- `SERVER_HOST`/`API_PORT` dejan de ser la IP LAN del PC de desarrollo y pasan a ser el **FQDN
+  público del backend** (`sidru-209313030.eastus2.cloudapp.azure.com`, puerto `8080`) — ese puerto
+  ya está expuesto a internet según `infra/deploy/README.md` ("temporal, mientras el firmware siga
+  hablando HTTP plano"). No hace falta HTTPS/TLS para esta fase: sería mucho más pesado para un
+  módem 2G y el puerto plano ya es accesible.
+- Subir `HTTP_TIMEOUT_MS` (hoy 8000): un round-trip HTTP sobre GPRS 2G es notablemente más lento que
+  sobre WiFi/LAN. Punto de partida sugerido: 20000–30000 ms; ajustar con medición real (tarea de
+  FASE 7 en `tasks.md`).
+
+### 8.4 Migración de `mqtt_client.cpp` (se intenta MQTT real sobre GPRS)
+
+- `WiFiClient wifiClient; PubSubClient client(wifiClient);` → `PubSubClient client(net::gsmClient());`
+- `MQTT_HOST` pasa del broker LAN al mismo FQDN público, puerto `1883` (también ya expuesto, ver
+  `infra/deploy/README.md`).
+- Mantener un socket TCP persistente vía comandos AT en un módem 2G es más frágil que sobre WiFi
+  (latencia alta, portador GPRS que puede caerse). **No se descarta MQTT**: se intenta como canal
+  principal, pero se instrumenta un contador de reconexiones fallidas consecutivas.
+- **Fallback automático (US-IOT-12, RN-IOT-11):** si `reconnect()` falla **N veces seguidas**
+  (constante nueva, ej. `MQTT_MAX_FALLBACK_RETRIES = 5`), el bin pasa a *polling*
+  (`GET /sessions/qr/{token}` cada `POLL_INTERVALO_MS`, ya implementado en `state_machine.cpp` para
+  el caso `MQTT_ENABLED=false`) **sin dejar de reintentar MQTT en segundo plano**. Al reconectar,
+  vuelve a usarlo como canal principal. Esto es aditivo sobre el mecanismo que ya existe para
+  `sidru.mqtt.enabled=false`; no lo reemplaza.
+
+### 8.5 Logging: por qué `Serial` deja de servir y qué lo reemplaza
+
+`UART0` (el mismo que usa `Serial.begin(115200)` hoy para todo el logging del firmware — ver
+`main.cpp`, `wifi_manager.cpp`, `api_client.cpp`, `mqtt_client.cpp`, `hw/*.cpp`) es exactamente donde
+está soldado el módem GSM (GPIO1/GPIO3). Con el módem activo, **cualquier `Serial.print*` escribe
+texto de depuración directo al módem** (rompe el parseo de respuestas AT) y cualquier dato que envíe
+el módem se mezcla con lo que el USB-serie cree que es logging.
+
+Cambio requerido: introducir `src/dbg/log.h(.cpp)` con una función/macro `LOG(fmt, ...)` que:
+- **En campo (con GSM activo):** no escribe a `Serial`. Opcionalmente alimenta el `MONITOR_MODE` ya
+  existente en el display (US-IOT-14: señal, registro, IP en vez de WiFi) y/o `mqtt::publishEvent`
+  cuando hay conexión (best-effort, ya existe el mecanismo, US-30 previo).
+  - **En banco (`GSM_BENCH_MODE=1`, ver §8.6):** puede seguir escribiendo a `Serial` normal, o a un
+  UART2 secundario en pines libres (`GPIO25`/`GPIO26`, ver `hardware-spec.md` §2) si se quiere ver
+  logs con el módem ya conectado, usando un adaptador FTDI/CP2102 externo.
+- Reemplaza sistemáticamente todos los `Serial.print/println/printf` existentes por `LOG(...)`. Esto
+  es un cambio transversal a varios archivos — se detalla como tarea explícita en `tasks.md` FASE 7
+  para que "coder" no lo trate como un detalle menor.
+
+### 8.6 Convivencia con WiFi (no se borra, queda como modo de banco)
+
+- Nuevo selector en `config.h`: `#define GSM_BENCH_MODE 0` (0 = campo, usa GSM; 1 = banco, usa WiFi
+  como hoy). `main.cpp`/`state_machine.cpp` llaman a una fachada mínima común (`net::transportBegin()`
+  / `net::transportEnsure()` / `net::transportClient()`) que delega a `gsm_manager` o `wifi_manager`
+  según el flag, para no bifurcar la máquina de estados.
+- `wifi_manager.cpp` no se modifica funcionalmente; solo se le agrega este punto de entrada común.
+
+### 8.7 Riesgo de seguridad heredado (no introducido por este cambio)
+
+`infra/deploy/mosquitto/config/mosquitto.conf` y `infra/deploy/README.md` ya documentan que el
+`1883` está **anónimo y abierto a internet "para la demo"**, con el endurecimiento (password/TLS)
+pendiente como mejora (RNF-IOT-09). Enrutar el bin por GSM usa esa misma superficie ya expuesta —
+no la amplía — pero la vuelve la superficie **de uso real de campo** en vez de solo "temporal para
+pruebas". Vale la pena revisar el endurecimiento antes de una instalación de campo prolongada.

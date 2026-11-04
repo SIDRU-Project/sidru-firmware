@@ -2,7 +2,8 @@
 #include <Arduino.h>
 #include <esp_sleep.h>
 #include "../config.h"
-#include "../net/wifi_manager.h"
+#include "../dbg/log.h"
+#include "../net/transport.h"
 #include "../net/api_client.h"
 #include "../net/mqtt_client.h"
 #include "../net/offline_queue.h"
@@ -45,7 +46,7 @@ static void resetCycle() {
 // Sincroniza sesiones offline pendientes cuando hay WiFi (US-16). Throttled para no
 // bloquear la pantalla "Comenzar"; sync() drena hasta el primer fallo.
 static void syncOfflineIfDue() {
-    if (offline::pending() == 0 || !net::wifiConnected()) return;
+    if (offline::pending() == 0 || !net::transportConnected()) return;
     if (millis() - lastSyncMs < OFFLINE_SYNC_INTERVAL_MS) return;
     lastSyncMs = millis();
     int n = offline::sync();
@@ -62,7 +63,7 @@ static void maybeDeepSleep() {
     if (offline::pending() > 0) return;
     if (millis() - lastActivityMs < DEEP_SLEEP_AFTER_MS) return;
 
-    Serial.println("[SLEEP] inactividad: entrando en deep sleep");
+    LOG("[SLEEP] inactividad: entrando en deep sleep\r\n");
     mqtt::publishEvent("sleep", "inactividad");
     delay(150);
     hw::showBanner("DURMIENDO", "toca para iniciar");
@@ -167,7 +168,7 @@ void update() {
         case CREATING: {
             // US-16: si no hay WiFi o el backend falla, la sesión NO se pierde: se
             // guarda en NVS y se sincroniza luego (no se muestra QR, el ciudadano ya no está).
-            if (!net::wifiConnected()) {
+            if (!net::transportConnected()) {
                 offline::enqueue(capCount, weightGrams);
                 mqtt::publishEvent("offline_queued", String("no_wifi pending=") + offline::pending());
                 hw::showBanner("GUARDADO", "sin conexion");
@@ -202,13 +203,14 @@ void update() {
                 resetCycle();
                 break;
             }
-            // Canal principal: OPEN por MQTT.
+            // Canal principal: OPEN por MQTT (sigue escuchando aunque esté en fallback).
             if (mqtt::isEnabled() && mqtt::consumeOpen()) {
                 state = OPEN_GATE;
                 break;
             }
-            // Fallback: polling del estado por HTTP.
-            if (!mqtt::isEnabled() && (millis() - lastPollMs >= POLL_INTERVALO_MS)) {
+            // Red de seguridad: polling por HTTP si MQTT está deshabilitado, o
+            // habilitado pero cayó en fallback por reconexiones fallidas (US-IOT-12).
+            if (mqtt::shouldPoll() && (millis() - lastPollMs >= POLL_INTERVALO_MS)) {
                 lastPollMs = millis();
                 String st = api::sessionStatus(qrToken);
                 if (st == "CONFIRMED") {

@@ -2,6 +2,7 @@
 #include <Arduino.h>
 #include <HX711.h>
 #include "../config.h"
+#include "../dbg/log.h"
 
 namespace hw {
 
@@ -13,9 +14,9 @@ void scaleBegin() {
     // Boot-safe: si la celda no está conectada, NO bloquear el arranque en tare().
     if (scale.wait_ready_timeout(1000)) {
         scale.tare();
-        Serial.println("[HX711] listo y tarado");
+        LOG("[HX711] listo y tarado\r\n");
     } else {
-        Serial.println("[HX711] no detectado — continuo sin balanza (peso=0)");
+        LOG("[HX711] no detectado — continuo sin balanza (peso=0)\r\n");
     }
 }
 
@@ -49,6 +50,15 @@ long scaleReadRaw(int times) {
 
 void scaleSetFactor(float f) {
     scale.set_scale(f);
+}
+
+bool scaleSelfTest(long& rawOut, unsigned long timeoutMs) {
+    if (!scale.wait_ready_timeout(timeoutMs)) {
+        rawOut = 0;
+        return false;
+    }
+    rawOut = scale.read();   // crudo, sin tara ni escala (para diagnóstico)
+    return rawOut != 0 && rawOut != -1;
 }
 
 }  // namespace hw

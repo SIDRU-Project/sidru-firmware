@@ -1,7 +1,15 @@
 #include "wifi_manager.h"
-#include <WiFi.h>
 #include "../config.h"
+
+// En campo (GSM_BENCH_MODE=0), WiFi queda excluido POR CONSTRUCCIÓN: internet
+// en campo es solo por la SIM (pedido explícito del usuario) — no alcanza con
+// simplemente no llamar a estas funciones (eso ya lo garantizaba el linker por
+// dead-code elimination), tiene que no compilarse ni enlazarse nada de WiFi/lwip.
+#if GSM_BENCH_MODE
+
+#include <WiFi.h>
 #include "../secrets.h"
+#include "../dbg/log.h"
 
 // Redes de failover opcionales. Si secrets.h no las define, quedan vacías y se
 // ignoran, así un secrets.h viejo (con solo WIFI_SSID/WIFI_PASS) sigue compilando.
@@ -57,8 +65,7 @@ static bool connectNext() {
             WiFi.disconnect(true);
             WiFi.begin(kNets[current].ssid, kNets[current].pass);
             attemptStart = millis();
-            Serial.printf("\n[WiFi] Probando \"%s\" (%d/%d)",
-                          kNets[current].ssid, current + 1, kNetCount);
+            LOG("\n[WiFi] Probando \"%s\" (%d/%d)", kNets[current].ssid, current + 1, kNetCount);
             return true;
         }
     }
@@ -70,7 +77,7 @@ void wifiBegin() {
     WiFi.setSleep(false);
     current = -1;
     if (!connectNext()) {
-        Serial.println("[WiFi] No hay redes configuradas en secrets.h");
+        LOG("[WiFi] No hay redes configuradas en secrets.h\r\n");
     }
 }
 
@@ -89,9 +96,9 @@ bool wifiEnsure() {
     if (WiFi.status() == WL_CONNECTED) {
         if (!announced) {
             announced = true;
-            Serial.printf("\n[WiFi] OK  red=\"%s\"  IP=%s  RSSI=%d dBm\n",
-                          (current >= 0 ? kNets[current].ssid : "?"),
-                          WiFi.localIP().toString().c_str(), WiFi.RSSI());
+            LOG("\n[WiFi] OK  red=\"%s\"  IP=%s  RSSI=%d dBm\n",
+                (current >= 0 ? kNets[current].ssid : "?"),
+                WiFi.localIP().toString().c_str(), WiFi.RSSI());
         }
         return true;
     }
@@ -101,7 +108,7 @@ bool wifiEnsure() {
 
     if (now - lastDot >= WIFI_RETRY_MS) {
         lastDot = now;
-        Serial.print(".");
+        LOG(".");
     }
 
     if (now - attemptStart >= WIFI_CONNECT_TIMEOUT_MS) {
@@ -111,3 +118,5 @@ bool wifiEnsure() {
 }
 
 }  // namespace net
+
+#endif  // GSM_BENCH_MODE

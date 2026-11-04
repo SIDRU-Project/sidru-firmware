@@ -22,3 +22,6 @@
 // --- MQTT (mismas credenciales que infra/mqtt) ---
 #define MQTT_USER   "sidru"
 #define MQTT_PASS   "sidru_mqtt_pass"
+
+// --- GSM/GPRS: password del APN, solo si el operador lo exige (Entel normalmente no) ---
+#define GSM_APN_PASS ""
