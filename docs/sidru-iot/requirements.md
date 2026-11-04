@@ -48,6 +48,43 @@ Entregar la integración IoT end-to-end que permita:
 
 ---
 
+## 3.1 Transporte físico — GSM/GPRS como fuente principal de internet (decisión SUPERSEDIDA)
+
+> **SUPERSEDIDA el 20-09-2026:** tras evaluar en campo el IOT-GA6 (no enciende: sin `PWRKEY`
+> accesible) y el SIM800L (enciende y ve la SIM, pero con la alimentación disponible no logró
+> registrarse: `CREG:2 CSQ:0` a 3.0–3.7 V), el usuario decidió **descartar la SIM y volver al WiFi**
+> como transporte del bin. El firmware conserva todo el camino GSM detrás de `GSM_BENCH_MODE=0`
+> (latente, compila) y `GSM_BENCH_MODE=1` (WiFi) vuelve a ser la configuración de operación. Lo
+> que sigue de esta sección y las US-IOT-11..14 quedan como diseño de referencia por si se retoma.
+
+**Decidido:** el Smart Bin se instala en campo **sin WiFi disponible**. El módulo GSM/GPRS 2G es la
+**fuente principal** de conectividad a internet, no un fallback. Módulo: **SIM800L core board**
+desde el 20-09-2026 (reemplaza al IOT-GA6/Ai-Thinker A6 evaluado primero, que nunca llegó a
+encender por no tener `PWRKEY` accesible); ambos usan el mismo cableado UART0 y el mismo diseño de
+firmware (solo cambia el driver de TinyGSM). El cableado físico ya está soldado: **TX del módulo →
+GPIO3** (RXD0/UART0 del ESP32), **RX del módulo ← GPIO1** (TXD0/UART0 del ESP32) — el mismo UART0
+que usa el chip USB-serie para programar y depurar el ESP32 por Serial Monitor.
+
+**Implicancias fijas:**
+- El transporte **HTTP + MQTT** de la sección 3 y de `api-contract.md` **no cambia a nivel de
+  protocolo/aplicación**; solo cambia la capa física (WiFi → GPRS) y el destino de red: de una IP
+  LAN (`192.168.x.x`) al **FQDN público del backend** (`sidru-209313030.eastus2.cloudapp.azure.com`),
+  usando los puertos que `infra/deploy/README.md` ya documenta como expuestos a internet (`8080`
+  HTTP plano, `1883` MQTT anónimo, ambos marcados ahí como "temporal/demo").
+- Se **intenta mantener MQTT real (push)** como canal principal de apertura sobre GPRS (RF-05); el
+  *polling* HTTP que ya existía como modo manual (US-IOT-09) pasa a ser además una **red de
+  seguridad automática** si el socket MQTT sobre GPRS resulta inestable (ver US-IOT-12).
+- **UART0 (`Serial`) queda reservado al módem GSM** en el firmware de campo: ningún log de
+  depuración puede seguir escribiéndose por `Serial` mientras el módem está activo (ver
+  RNF-IOT-12 y `design.md` §8 para el reemplazo del logging).
+- El `wifi_manager` existente **se conserva en el código** como modo de banco/desarrollo
+  (compilado solo bajo un flag, ej. `GSM_BENCH_MODE=0`); no se borra, pero deja de ser el
+  transporte de campo.
+- Detalle de arquitectura, wiring y migración de `api_client`/`mqtt_client`: `design.md` §8.
+  Verificación eléctrica y checklist de banco del módulo: `hardware-spec.md` §6.
+
+---
+
 ## 4. Alcance Incluido
 
 | Área | Funcionalidades |
@@ -113,6 +150,24 @@ Entregar la integración IoT end-to-end que permita:
 **US-IOT-10** — Provisioning seguro del dispositivo *(seguridad)*
 > Como operador, quiero que la API key y las credenciales WiFi/MQTT del bin no estén en el repo, para
 > no exponer secretos.
+
+**US-IOT-11** — Conectividad primaria por GSM/GPRS *(RF-01/RF-05 extendidos · §3.1)*
+> Como Smart Bin instalado sin WiFi disponible, quiero conectarme a internet vía el módulo GSM/GPRS
+> (GA6), para poder crear sesiones y recibir confirmaciones igual que si tuviera WiFi.
+
+**US-IOT-12** — Resiliencia del socket MQTT sobre GPRS *(RF-05 extendido)*
+> Como Smart Bin conectado por GSM, quiero caer automáticamente a *polling* HTTP si el socket MQTT
+> sobre GPRS se cae repetidamente, para no perder la capacidad de abrir la compuerta aunque el push
+> falle, y volver a MQTT solo cuando se recupere.
+
+**US-IOT-13** — Registro de red y GPRS antes de operar *(resiliencia)*
+> Como Smart Bin, quiero verificar que la SIM está lista, que hay registro de red celular y que el
+> GPRS está adjunto antes de intentar crear una sesión, para no fallar a mitad de un depósito por
+> falta de red.
+
+**US-IOT-14** — Diagnóstico sin puerto serie disponible *(operabilidad)*
+> Como operador, quiero ver el estado del módem (señal, registro, IP) en el propio display del bin
+> (`MONITOR_MODE`), porque el puerto USB/Serial ya no sirve para depurar con el módem conectado.
 
 ---
 
@@ -266,6 +321,56 @@ Escenario: Sin secretos en el repo
   Y esos valores viven en secrets.h (gitignored) / NVS / variables de entorno
 ```
 
+### US-IOT-11 — Conectividad primaria por GSM/GPRS
+
+```gherkin
+Escenario: Creación de sesión vía GPRS
+  Dado que el bin está registrado en la red celular y adjunto a GPRS
+  Cuando ejecuta el flujo normal de depósito
+  Entonces hace POST /sessions contra el FQDN público del backend usando el socket TCP del módem GSM
+  Y recibe el qrToken igual que por WiFi
+
+Escenario: Sin señal celular
+  Dado que el módem no logra registro de red (AT+CREG ni "1" ni "5")
+  Cuando el bin intenta operar
+  Entonces muestra "Sin señal" y reintenta con backoff, sin crear sesiones (mismo criterio que RN-IOT-09)
+```
+
+### US-IOT-12 — Resiliencia del socket MQTT sobre GPRS
+
+```gherkin
+Escenario: Caída del socket MQTT sobre GPRS
+  Dado que el bin intentó reconectar MQTT N veces consecutivas sin éxito (N configurable, default 5)
+  Cuando sigue esperando una confirmación
+  Entonces cae a polling GET /sessions/qr/{token} cada POLL_INTERVALO_MS
+  Y sigue reintentando MQTT en segundo plano
+  Y si MQTT reconecta, vuelve a usarlo como canal principal sin duplicar la apertura
+```
+
+### US-IOT-13 — Registro de red y GPRS antes de operar
+
+```gherkin
+Escenario: SIM no lista
+  Dado que AT+CPIN? no responde READY
+  Cuando el bin arranca
+  Entonces muestra error de SIM y no intenta crear sesiones
+
+Escenario: GPRS no adjunto
+  Dado que hay registro de red pero AT+CGATT? = 0
+  Cuando el bin intenta abrir el contexto PDP
+  Entonces reintenta con backoff antes de permitir el flujo de depósito
+```
+
+### US-IOT-14 — Diagnóstico sin puerto serie disponible
+
+```gherkin
+Escenario: Diagnóstico en MONITOR_MODE
+  Dado que MONITOR_MODE=true y el bin usa GSM
+  Cuando se consulta el display
+  Entonces muestra intensidad de señal (AT+CSQ), estado de registro y si hay GPRS adjunto,
+  en lugar de la información de WiFi
+```
+
 ---
 
 ## 8. Requerimientos No Funcionales
@@ -283,6 +388,10 @@ Escenario: Sin secretos en el repo
 | RNF-IOT-09 | Seguridad (mejora) | TLS/mTLS en MQTT queda como mejora post-MVP; el MVP opera en LAN confiable |
 | RNF-IOT-10 | Mantenibilidad | Pines, topics y endpoints centralizados en constantes (`config.h` / `application.properties`), no hardcodeados dispersos |
 | RNF-IOT-11 | Coherencia | `weightGrams` reportado coherente con `capCount` (peso ≈ chapas × ~2.3 g); la celda calibrada |
+| RNF-IOT-12 | Arquitectura | UART0 (`Serial`) queda reservado al módem GSM en el firmware de campo; ningún log de depuración se escribe por `Serial` mientras el módem está activo (ver `design.md` §8, logging) |
+| RNF-IOT-13 | Electrónica | El módulo GSM se alimenta de una fuente externa regulada (3.4–4.4 V, picos ≥2 A) con capacitor de baja ESR (1000–2200 µF) cerca del módulo y **GND común** con el ESP32; nunca desde el 3V3/5V del ESP32 |
+| RNF-IOT-14 | Resiliencia | El bin reintenta registro de red celular y adjunto GPRS con backoff, sin bloquear indefinidamente el `loop()` |
+| RNF-IOT-15 | Seguridad (heredado) | El backend ya expone `8080` (HTTP plano) y `1883` (MQTT anónimo) a internet como "temporal/demo" (`infra/deploy/README.md`); el bin por GSM usa exactamente esa superficie ya expuesta, no la amplía. El endurecimiento (TLS/auth) sigue pendiente como mejora post-MVP (RNF-IOT-09) |
 
 ---
 
@@ -299,6 +408,8 @@ Escenario: Sin secretos en el repo
 | RN-IOT-07 | La sesión expira a los 15 min (alineado a `session-expiry-minutes`); el bin descarta el QR |
 | RN-IOT-08 | El comando `OPEN` se dirige al `deviceCode` que originó la sesión (su Smart Bin) |
 | RN-IOT-09 | Sin WiFi/red, el bin no crea sesiones; muestra estado de error y reintenta |
+| RN-IOT-10 | Sin registro de red celular o sin GPRS adjunto, el bin no crea sesiones (mismo criterio que RN-IOT-09, aplicado a GSM) |
+| RN-IOT-11 | El fallback MQTT→polling (US-IOT-12) es automático y transparente; no requiere reconfigurar el firmware |
 
 ---
 
@@ -314,6 +425,10 @@ Escenario: Sin secretos en el repo
 | ERR-IOT-06 | Sensor inductivo activo (metal) | Firmware | Rechazar con servo; no contar |
 | ERR-IOT-07 | Celda sin calibrar / lectura inestable | Firmware | No enviar peso; pedir recalibración |
 | ERR-IOT-08 | `deviceCode` no resuelto en backend | Backend | Loguear; no publicar OPEN; confirm sigue OK |
+| ERR-IOT-09 | SIM no lista (`AT+CPIN?` ≠ READY) | Firmware | Mostrar error, no operar |
+| ERR-IOT-10 | Sin registro de red celular | Firmware | Backoff; UI "Sin señal" |
+| ERR-IOT-11 | GPRS no adjunto | Firmware | Backoff antes de permitir depósito |
+| ERR-IOT-12 | Socket MQTT sobre GPRS inestable (N reconexiones fallidas) | Firmware | Fallback automático a polling (US-IOT-12) |
 
 ---
 
@@ -331,6 +446,10 @@ Escenario: Sin secretos en el repo
 | US-IOT-08 | — | — | RNF-IOT-04 |
 | US-IOT-09 | — (operacional) | — | RNF-IOT-08 |
 | US-IOT-10 | seguridad | — | RNF-IOT-01, RNF-IOT-02 |
+| US-IOT-11 | GA6/GPRS §3.1 | RF-01, RF-05 (extendidos) | RNF-IOT-13, RNF-IOT-14 |
+| US-IOT-12 | mqtt/polling | RF-05 (extendido) | RNF-IOT-04 |
+| US-IOT-13 | GA6 | — | RNF-IOT-14 |
+| US-IOT-14 | display (MONITOR_MODE) | — | RNF-IOT-12 |
 
 ### Mapa RF → entregable
 

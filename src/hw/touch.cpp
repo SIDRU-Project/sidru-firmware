@@ -43,6 +43,44 @@ bool touchPressed() {
     return z2 < TOUCH_Z2_THRESHOLD;
 }
 
+// Detector de "tap" por FLANCO + PRESIÓN SOSTENIDA EN TIEMPO REAL. Exige ver la
+// pantalla SUELTA antes de aceptar una pulsación y luego presión continua durante
+// TOUCH_TAP_HOLD_MS. Como se mide por reloj (no por nº de lecturas), da igual si el
+// loop corre a kHz (START) o lento (COUNTING): una ráfaga de ruido de microsegundos
+// —o la 1.ª lectura espuria del XPT2046 tras compartir el bus SPI con el display—
+// NO alcanza el tiempo mínimo y NO salta sola la pantalla de inicio.
+static bool          tapArmed   = false;
+static bool          pressing   = false;
+static unsigned long pressSince = 0;
+
+void touchTapReset() {
+    tapArmed = false;   // hasta no ver "suelto", ningún toque cuenta
+    pressing = false;
+}
+
+bool touchTap() {
+    if (!touchPressed()) {            // pantalla suelta
+        tapArmed = true;             // re-arma: el próximo toque real cuenta
+        pressing = false;            // cualquier presión previa se descarta (no sostenida)
+        return false;
+    }
+    if (!tapArmed) return false;     // toque heredado/espurio: ignorar hasta soltar
+    unsigned long now = millis();
+    if (!pressing) {                 // flanco de bajada: arranca el cronómetro
+        pressing   = true;
+        pressSince = now;
+        return false;
+    }
+    // Solo una presión CONTINUA ≥ TOUCH_TAP_HOLD_MS cuenta como pulsación real.
+    // Un ruido que parpadea pasa por la rama "suelta" y reinicia el cronómetro.
+    if (now - pressSince >= TOUCH_TAP_HOLD_MS) {
+        tapArmed = false;            // dispara una sola vez por pulsación
+        pressing = false;
+        return true;
+    }
+    return false;
+}
+
 int touchX()  { return lastX; }
 int touchY()  { return lastY; }
 int touchZ()  { return lastZ; }

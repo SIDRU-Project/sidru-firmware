@@ -3,7 +3,9 @@
 
 namespace hw {
 void touchBegin();
-bool touchPressed();   // true si la presión supera el umbral
+bool touchPressed();   // true si la presión supera el umbral (lectura cruda)
+bool touchTap();       // true UNA vez por pulsación nueva (flanco + anti-rebote)
+void touchTapReset();  // re-arma el detector al entrar a una pantalla con botón
 int  touchX();
 int  touchY();
 int  touchZ();         // presión calculada (z1 + 4095 - z2)

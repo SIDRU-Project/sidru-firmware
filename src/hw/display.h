@@ -1,5 +1,6 @@
 #pragma once
 #include <Arduino.h>
+#include "../dbg/selftest.h"
 // Pantallas del ILI9341 (incluye render del QR de la sesión).
 
 namespace hw {
@@ -14,9 +15,14 @@ void showExpired();
 void showError(const String& msg);
 void showReject(int secs);   // aviso de metal: "retira tu mano" + cuenta regresiva
 
-// Dashboard de diagnóstico (MONITOR_MODE): WiFi + sensores + material + balanza + táctil.
-// Redibuja solo los valores que cambian (sin parpadeo), limpiando cada línea a lo ancho.
-void showMonitor(bool wifiOk, const String& ip, int cap, int ind, float grams, bool touch);
+// Pantalla DIAG (FASE 7, self-test + US-IOT-14): tabla compacta nombre/estado/detalle
+// de dbg::SelfTest, valores vivos de sensores/balanza/táctil, y las últimas líneas del
+// ring buffer de LOG (dbg::lastLines) — funciona igual en banco (WiFi) y en campo (GSM),
+// st.items[CHK_TRANSPORT] ya trae el dato correcto según el transporte activo. Reemplaza
+// a los antiguos showMonitor()/showMonitorGsm(). Refresco throttled (~500 ms), redibuja
+// solo lo que cambió. Se usa (a) como splash de arranque (DIAG_SPLASH_MS) y (b) de forma
+// permanente en MONITOR_MODE.
+void showDiag(const dbg::SelfTest& st, int cap, int ind, float grams, bool touch);
 
 // Pantalla de calibración de la balanza (CALIBRATION_MODE): muestra el valor crudo.
 void showCalib(const String& step, long raw, float grams);

@@ -50,4 +50,13 @@ DepositEvent pollDeposit() {
     return DEP_NONE;
 }
 
+// Ignora el capacitivo/inductivo durante `ms` y exige que el campo se libere
+// (HIGH) antes de contar el próximo objeto. Útil al mover el servo: su paleta
+// cruza el campo del capacitivo y NO debe contarse como una chapa.
+void sensorsIgnoreFor(unsigned long ms) {
+    lockoutUntil = millis() + ms;
+    lastCapState = LOW;   // fuerza esperar un flanco HIGH→LOW nuevo y real
+    lastMetalMs  = 0;     // descarta cualquier "metal" visto durante el barrido
+}
+
 }  // namespace hw

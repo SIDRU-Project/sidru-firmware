@@ -2,6 +2,7 @@
 #include <Preferences.h>
 #include <ArduinoJson.h>
 #include "../config.h"
+#include "../dbg/log.h"
 #include "api_client.h"
 
 namespace offline {
@@ -42,7 +43,7 @@ void begin() {
             count++;
         }
     }
-    Serial.printf("[OFFLINE] cola cargada: %d pendiente(s)\n", count);
+    LOG("[OFFLINE] cola cargada: %d pendiente(s)\n", count);
 }
 
 int pending() { return count; }
@@ -52,13 +53,13 @@ bool enqueue(int capCount, float weightGrams) {
         // Cola llena: descarta la más vieja para conservar lo más reciente.
         for (int i = 1; i < count; i++) items[i - 1] = items[i];
         count--;
-        Serial.println("[OFFLINE] cola llena: se descarta la sesion mas antigua");
+        LOG("[OFFLINE] cola llena: se descarta la sesion mas antigua\r\n");
     }
     items[count].capCount    = capCount;
     items[count].weightGrams = weightGrams;
     count++;
     persist();
-    Serial.printf("[OFFLINE] guardada (%d caps, %.1f g). Pendientes=%d\n", capCount, weightGrams, count);
+    LOG("[OFFLINE] guardada (%d caps, %.1f g). Pendientes=%d\n", capCount, weightGrams, count);
     return true;
 }
 
@@ -81,7 +82,7 @@ int sync() {
             break;
         }
     }
-    if (sent > 0) Serial.printf("[OFFLINE] sincronizadas %d. Pendientes=%d\n", sent, count);
+    if (sent > 0) LOG("[OFFLINE] sincronizadas %d. Pendientes=%d\n", sent, count);
     return sent;
 }
 

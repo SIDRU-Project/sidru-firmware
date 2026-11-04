@@ -11,5 +11,6 @@ enum DepositEvent {
 
 void sensorsBegin();
 DepositEvent pollDeposit();   // edge-triggered + debounce; un objeto = un evento
+void sensorsIgnoreFor(unsigned long ms);  // ignora el sensor por un tiempo (p.ej. al mover el servo)
 
 }  // namespace hw
